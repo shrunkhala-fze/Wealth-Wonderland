@@ -1,115 +1,201 @@
+// Copyright 2022, the Flutter project authors. Please see the AUTHORS file
+// for details. All rights reserved. Use of this source code is governed by a
+// BSD-style license that can be found in the LICENSE file.
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
+import 'package:logging/logging.dart';
+import 'package:provider/provider.dart';
+
+import 'src/app_lifecycle/app_lifecycle.dart';
+import 'src/audio/audio_controller.dart';
+import 'src/games_services/games_services.dart';
+import 'src/games_services/score.dart';
+import 'src/level_selection/level_selection_screen.dart';
+import 'src/level_selection/levels.dart';
+import 'src/main_menu/main_menu_screen.dart';
+import 'src/play_session/play_session_screen.dart';
+import 'src/player_progress/persistence/local_storage_player_progress_persistence.dart';
+import 'src/player_progress/persistence/player_progress_persistence.dart';
+import 'src/player_progress/player_progress.dart';
+import 'src/settings/persistence/local_storage_settings_persistence.dart';
+import 'src/settings/persistence/settings_persistence.dart';
+import 'src/settings/settings.dart';
+import 'src/settings/settings_screen.dart';
+import 'src/style/my_transition.dart';
+import 'src/style/palette.dart';
+import 'src/style/snack_bar.dart';
+import 'src/win_game/win_game_screen.dart';
 
 void main() {
-  runApp(const MyApp());
+  if (kReleaseMode) {
+    // Don't log anything below warnings in production.
+    Logger.root.level = Level.WARNING;
+  }
+  Logger.root.onRecord.listen((record) {
+    debugPrint('${record.level.name}: ${record.time}: '
+        '${record.loggerName}: '
+        '${record.message}');
+  });
+
+  WidgetsFlutterBinding.ensureInitialized();
+
+  _log.info('Going full screen');
+  SystemChrome.setEnabledSystemUIMode(
+    SystemUiMode.edgeToEdge,
+  );
+
+  GamesServicesController? gamesServicesController;
+  // if (!kIsWeb && (Platform.isIOS || Platform.isAndroid)) {
+  //   gamesServicesController = GamesServicesController()
+  //     // Attempt to log the player in.
+  //     ..initialize();
+  // }
+
+  runApp(
+    MyApp(
+      settingsPersistence: LocalStorageSettingsPersistence(),
+      playerProgressPersistence: LocalStoragePlayerProgressPersistence(),
+      gamesServicesController: gamesServicesController,
+    ),
+  );
 }
+
+Logger _log = Logger('main.dart');
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  static final _router = GoRouter(
+    routes: [
+      GoRoute(
+          path: '/',
+          builder: (context, state) =>
+              const MainMenuScreen(key: Key('main menu')),
+          routes: [
+            GoRoute(
+                path: 'play',
+                pageBuilder: (context, state) => buildMyTransition<void>(
+                      child: const LevelSelectionScreen(
+                          key: Key('level selection')),
+                      color: context.watch<Palette>().backgroundLevelSelection,
+                    ),
+                routes: [
+                  GoRoute(
+                    path: 'session/:level',
+                    pageBuilder: (context, state) {
+                      final levelNumber = int.parse(state.params['level']!);
+                      final level = gameLevels
+                          .singleWhere((e) => e.number == levelNumber);
+                      return buildMyTransition<void>(
+                        child: PlaySessionScreen(
+                          level,
+                          key: const Key('play session'),
+                        ),
+                        color: context.watch<Palette>().backgroundPlaySession,
+                      );
+                    },
+                  ),
+                  GoRoute(
+                    path: 'won',
+                    pageBuilder: (context, state) {
+                      final map = state.extra! as Map<String, dynamic>;
+                      final score = map['score'] as Score;
 
-  // This widget is the root of your application.
+                      return buildMyTransition<void>(
+                        child: WinGameScreen(
+                          score: score,
+                          key: const Key('win game'),
+                        ),
+                        color: context.watch<Palette>().backgroundPlaySession,
+                      );
+                    },
+                  )
+                ]),
+            GoRoute(
+              path: 'settings',
+              builder: (context, state) =>
+                  const SettingsScreen(key: Key('settings')),
+            ),
+          ]),
+    ],
+  );
+
+  final PlayerProgressPersistence playerProgressPersistence;
+
+  final SettingsPersistence settingsPersistence;
+
+  final GamesServicesController? gamesServicesController;
+
+  const MyApp({
+    required this.playerProgressPersistence,
+    required this.settingsPersistence,
+    required this.gamesServicesController,
+    super.key,
+  });
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
-        primarySwatch: Colors.blue,
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
-}
+    return AppLifecycleObserver(
+      child: MultiProvider(
+        providers: [
+          ChangeNotifierProvider(
+            create: (context) {
+              var progress = PlayerProgress(playerProgressPersistence);
+              progress.getLatestFromStore();
+              return progress;
+            },
+          ),
+          Provider<SettingsController>(
+            lazy: false,
+            create: (context) => SettingsController(
+              persistence: settingsPersistence,
+            )..loadStateFromPersistence(),
+          ),
+          ProxyProvider2<SettingsController, ValueNotifier<AppLifecycleState>,
+              AudioController>(
+            // Ensures that the AudioController is created on startup,
+            // and not "only when it's needed", as is default behavior.
+            // This way, music starts immediately.
+            lazy: false,
+            create: (context) => AudioController()..initialize(),
+            update: (context, settings, lifecycleNotifier, audio) {
+              if (audio == null) throw ArgumentError.notNull();
+              audio.attachSettings(settings);
+              audio.attachLifecycleNotifier(lifecycleNotifier);
+              return audio;
+            },
+            dispose: (context, audio) => audio.dispose(),
+          ),
+          Provider(
+            create: (context) => Palette(),
+          ),
+        ],
+        child: Builder(builder: (context) {
+          final palette = context.watch<Palette>();
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
-
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Invoke "debug painting" (press "p" in the console, choose the
-          // "Toggle Debug Paint" action from the Flutter Inspector in Android
-          // Studio, or the "Toggle Debug Paint" command in Visual Studio Code)
-          // to see the wireframe for each widget.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
+          return MaterialApp.router(
+            title: 'Wealth Wonderland',
+            debugShowCheckedModeBanner: false,
+            theme: ThemeData.from(
+              colorScheme: ColorScheme.fromSeed(
+                seedColor: palette.darkPen,
+                background: palette.backgroundMain,
+              ),
+              textTheme: TextTheme(
+                bodyMedium: TextStyle(
+                  color: palette.ink,
+                ),
+              ),
+              useMaterial3: true,
             ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
+            routeInformationProvider: _router.routeInformationProvider,
+            routeInformationParser: _router.routeInformationParser,
+            routerDelegate: _router.routerDelegate,
+            scaffoldMessengerKey: scaffoldMessengerKey,
+          );
+        }),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
