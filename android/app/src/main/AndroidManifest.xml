@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.temporary">
+    package="com.example.wealth_wonderland">
    <application
-        android:label="temporary"
+        android:label="wealth_wonderland"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
